@@ -1,0 +1,213 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESP32Servo.h>
+
+// WiFi credentials
+const char *ssid = "DOBI_GROUP9";
+const char *password = "AZPDOBI123.";
+
+// WebServer instance
+WebServer server(80);
+
+// Servo configurations
+Servo myServo;
+int servoPin = 5;
+int servoAngle = 0; // Current angle of the servo (0 = closed, 90 = open)
+
+// Global variables
+int weight = 0;
+float price = 0.0;
+float balance = 0.0;
+
+// Serial2 configurations
+#define RXD2 16
+#define TXD2 17
+
+void setup() {
+  // Initialize Servo
+  myServo.attach(servoPin);
+  myServo.write(servoAngle); // Start at 0°
+
+  // Initialize Serial2
+  Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
+
+  // Initialize Serial for debugging
+  Serial.begin(115200);
+
+  // Initialize WiFi in AP mode
+  WiFi.disconnect(true); // Clear any previous WiFi settings
+  delay(100); // Allow time for the hardware to reset
+
+  if (WiFi.softAP(ssid, password)) {
+    Serial.println("WiFi AP started successfully!");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.softAPIP());
+  } else {
+    Serial.println("Failed to start WiFi AP!");
+    while (true); // Halt if WiFi fails to start
+  }
+
+  // Setup web server routes
+  server.on("/", handleRoot);
+  server.on("/topup", handleTopup);
+  server.on("/pay", handlePay);
+  server.on("/toggle-servo", handleToggleServo); // Route to toggle servo
+  server.begin();
+  Serial.println("Web server started!");
+}
+
+void loop() {
+  // Handle web server
+  server.handleClient();
+
+  // Check for and process data from Serial2
+  if (Serial2.available()) {
+    String incomingData = Serial2.readString(); // Read the entire incoming string
+    Serial.println("Raw Data received: " + incomingData); // Print to Serial Monitor
+
+    // Parse weight if valid
+    weight = incomingData.toInt();
+    price = weight / 1000.0; // Calculate price at RM1 per 1000g
+    Serial.println("Weight converted: " + String(weight));
+  }
+}
+
+void handleRoot() {
+  String page = R"rawliteral(
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Dobi G9 - Laundry System</title>
+      <style>
+        body {
+          font-family: Arial, sans-serif;
+          margin: 0;
+          padding: 0;
+          background-color: #121212;
+          color: #ffffff;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          height: 100vh;
+        }
+        .container {
+          max-width: 400px;
+          width: 100%;
+          background: #1f1f1f;
+          box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+          border-radius: 8px;
+          padding: 20px;
+          text-align: center;
+        }
+        h1 {
+          font-size: 24px;
+          margin-bottom: 20px;
+          color: #00FF7F;
+        }
+        p {
+          font-size: 18px;
+          margin: 10px 0;
+        }
+        .button {
+          display: block;
+          width: 100%;
+          padding: 10px;
+          margin: 10px 0;
+          background-color: #007bff;
+          color: white;
+          text-decoration: none;
+          font-size: 16px;
+          border: none;
+          border-radius: 4px;
+          cursor: pointer;
+        }
+        .button:hover {
+          background-color: #0056b3;
+        }
+        form input[type="number"] {
+          width: 80%;
+          padding: 10px;
+          margin: 10px 0;
+          border: 1px solid #333;
+          border-radius: 4px;
+          font-size: 16px;
+          background-color: #1f1f1f;
+          color: white;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <h1>Dobi G9 - Laundry System</h1>
+        <p><strong>Weight:</strong> <span id="weight">[[WEIGHT]]</span> grams</p>
+        <p><strong>Price:</strong> RM <span id="price">[[PRICE]]</span></p>
+        <p><strong>Balance:</strong> RM <span id="balance">[[BALANCE]]</span></p>
+        <form action="/topup" method="POST">
+          <input type="number" name="amount" placeholder="Enter top-up amount (RM)" required>
+          <button class="button" type="submit">Top Up</button>
+        </form>
+        <form action="/pay" method="POST">
+          <button class="button" type="submit">Pay Now</button>
+        </form>
+        <button class="button" onclick="toggleServo()">[[SERVO_BUTTON]]</button>
+      </div>
+      <script>
+        function toggleServo() {
+          fetch('/toggle-servo')
+            .then(response => response.text())
+            .then(data => {
+              console.log(data);
+              location.reload(); // Reload page to reflect the new servo state
+            });
+        }
+      </script>
+    </body>
+    </html>
+  )rawliteral";
+
+  // Replace placeholders
+  page.replace("[[WEIGHT]]", String(weight));
+  page.replace("[[PRICE]]", String(price, 2));
+  page.replace("[[BALANCE]]", String(balance, 2));
+  page.replace("[[SERVO_BUTTON]]", servoAngle == 0 ? "Open the washing machine" : "Close the washing machine");
+
+  Serial.println("Sending root page...");
+  server.send(200, "text/html", page);
+}
+
+void handleTopup() {
+  if (server.hasArg("amount")) {
+    float topup = server.arg("amount").toFloat();
+    balance += topup; // Add top-up to balance
+    Serial.println("Top-up successful: RM " + String(topup));
+  } else {
+    Serial.println("Top-up failed: No amount provided.");
+  }
+  server.sendHeader("Location", "/"); // Redirect to root page
+  server.send(303);
+}
+
+void handlePay() {
+  if (balance >= price) {
+    balance -= price; // Deduct the price from the balance
+    Serial2.println("PAID"); // Send "PAID" to Serial2
+    Serial.println("Payment successful! Remaining balance: RM " + String(balance));
+    server.send(200, "text/html", "<h1>Payment Successful</h1><a href='/'>Go Back</a>");
+  } else {
+    Serial.println("Payment failed: Insufficient balance.");
+    server.send(200, "text/html", "<h1>Insufficient Balance</h1><a href='/'>Top-up and Try Again</a>");
+  }
+}
+
+void handleToggleServo() {
+  // Toggle servo state
+  if (servoAngle == 0) {
+    servoAngle = 90; // Open
+  } else {
+    servoAngle = 0;  // Close
+  }
+  myServo.write(servoAngle); // Move the servo
+  Serial.println("Servo angle set to: " + String(servoAngle));
+  
+}
